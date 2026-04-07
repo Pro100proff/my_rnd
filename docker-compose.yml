@@ -1,0 +1,144 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: platform
+      POSTGRES_USER: platform
+      POSTGRES_PASSWORD: secret
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.1
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+
+  kafka:
+    image: confluentinc/cp-kafka:7.6.1
+    depends_on:
+      - zookeeper
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    ports:
+      - "9092:9092"
+
+  namenode:
+    image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
+    environment:
+      CLUSTER_NAME: archive-cluster
+      CORE_CONF_fs_defaultFS: hdfs://namenode:8020
+    ports:
+      - "9870:9870"
+      - "8020:8020"
+    volumes:
+      - hadoop_namenode:/hadoop/dfs/name
+
+  datanode:
+    image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
+    depends_on:
+      - namenode
+    environment:
+      CORE_CONF_fs_defaultFS: hdfs://namenode:8020
+      SERVICE_PRECONDITION: namenode:9870
+    volumes:
+      - hadoop_datanode:/hadoop/dfs/data
+
+  spark-master:
+    image: bitnami/spark:3.5.1
+    environment:
+      SPARK_MODE: master
+    ports:
+      - "7077:7077"
+      - "8080:8080"
+
+  spark-worker:
+    image: bitnami/spark:3.5.1
+    depends_on:
+      - spark-master
+    environment:
+      SPARK_MODE: worker
+      SPARK_MASTER_URL: spark://spark-master:7077
+
+  archive-maintenance:
+    build:
+      context: .
+      dockerfile: docker/archive-maintenance/Dockerfile
+    depends_on:
+      - kafka
+      - postgres
+      - spark-master
+      - namenode
+    command:
+      - spark-submit
+      - --master
+      - spark://spark-master:7077
+      - --conf
+      - spark.sql.orc.compression.codec=zstd
+      - --class
+      - com.platform.archive.maintenance.ArchiveMaintenanceJob
+      - /opt/app/archive-maintenance.jar
+      - --kafka-brokers
+      - kafka:9092
+      - --merge-events-topic
+      - merge-events
+      - --pg-jdbc
+      - jdbc:postgresql://postgres:5432/platform
+      - --pg-user
+      - platform
+      - --pg-password
+      - secret
+
+  flink-jobmanager:
+    image: flink:1.19.2-scala_2.12-java17
+    command: jobmanager
+    environment:
+      JOB_MANAGER_RPC_ADDRESS: flink-jobmanager
+    ports:
+      - "8082:8081"
+
+  flink-taskmanager:
+    image: flink:1.19.2-scala_2.12-java17
+    command: taskmanager
+    depends_on:
+      - flink-jobmanager
+    environment:
+      JOB_MANAGER_RPC_ADDRESS: flink-jobmanager
+      TASK_MANAGER_NUMBER_OF_TASK_SLOTS: "2"
+
+  flink-archive-indexer:
+    build:
+      context: .
+      dockerfile: docker/flink-indexer/Dockerfile
+    depends_on:
+      - flink-jobmanager
+      - flink-taskmanager
+      - kafka
+      - namenode
+
+  kafka-raw-generator:
+    build:
+      context: .
+      dockerfile: docker/kafka-generator/Dockerfile
+    depends_on:
+      - kafka
+    command:
+      - --kafka-brokers
+      - kafka:9092
+      - --topic
+      - raw-archive-events
+      - --interval-ms
+      - "100"
+
+volumes:
+  hadoop_namenode:
+  hadoop_datanode:
