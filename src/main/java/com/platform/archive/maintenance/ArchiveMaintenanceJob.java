@@ -24,7 +24,6 @@ import org.slf4j.LoggerFactory;
 
 import java.time.Duration;
 import java.util.*;
-import java.util.stream.Collectors;
 
 public class ArchiveMaintenanceJob {
     private static final Logger log = LoggerFactory.getLogger(ArchiveMaintenanceJob.class);
@@ -98,10 +97,13 @@ public class ArchiveMaintenanceJob {
     }
 
     private static Map<String, List<CheckpointEvent>> parseAndGroup(ConsumerRecords<String, String> records) {
-        return records.stream()
-                .map(ArchiveMaintenanceJob::parseEvent)
-                .filter(Objects::nonNull)
-                .collect(Collectors.groupingBy(CheckpointEvent::indexId, LinkedHashMap::new, Collectors.toList()));
+        Map<String, List<CheckpointEvent>> grouped = new LinkedHashMap<>();
+        for (ConsumerRecord<String, String> rec : records) {
+            CheckpointEvent event = parseEvent(rec);
+            if (event == null) continue;
+            grouped.computeIfAbsent(event.indexId(), k -> new ArrayList<>()).add(event);
+        }
+        return grouped;
     }
 
     private static CheckpointEvent parseEvent(ConsumerRecord<String, String> rec) {
