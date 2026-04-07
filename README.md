@@ -1,52 +1,51 @@
-# Archive Maintenance Spark Job (prototype)
+# Full-cycle prototype: Flink indexing + Spark maintenance
 
-Прототип long-running Spark Job, который читает события из Kafka (`merge-events`) и для каждого `index_id` последовательно выполняет:
+Прототип теперь покрывает **полный цикл**:
 
-1. `merge` мелких ORC файлов из `/tmp/...`.
-2. `rotation` по правилам из Postgres.
-3. `deferred cleanup` (каждый 10-й цикл).
+1. **Flink Indexer Job** читает сырые события из Kafka (`raw-archive-events`).
+2. Пишет небольшие ORC-файлы (~1 МБ) в HDFS: `/tmp/{index_id}/dt=YYYY-MM-DD/hr=HH/slot-*.orc`.
+3. По завершению checkpoint Flink асинхронно отправляет событие в Kafka (`merge-events`).
+4. **Spark ArchiveMaintenanceJob** читает `merge-events` и выполняет merge + rotation + deferred cleanup.
 
-## Основные классы
+## Компоненты
 
-- `ArchiveMaintenanceJob` — основной цикл poll/group/process/commit.
-- `MergeExecutor` — идемпотентный merge и удаление исходников.
-- `RotationEvaluator` — строит список действий из `rotation_rules`.
-- `RotationExecutor` — применяет drop/filter/sampling/switch.
-- `DeferredCleanupService` — удаляет директории после `grace period`.
-- `PostgresClient` — доступ к метаданным и служебным таблицам.
+- `com.platform.archive.flink.FlinkArchiveIndexerJob`
+  - источник: Kafka;
+  - sink: rolling ORC writer в HDFS;
+  - размер файлов: `--target-file-size-bytes 1048576`;
+  - async публикация checkpoint-событий в `merge-events` через Kafka producer внутри sink.
+- `com.platform.archive.maintenance.ArchiveMaintenanceJob`
+  - long-running poll loop;
+  - merge, rotation и deferred deletes через Postgres-метаданные.
 
-## Локальный запуск (docker compose)
+## Docker Compose
 
 ```bash
 docker compose up --build
 ```
 
-Поднимаются: Postgres, Kafka, Spark master/worker и контейнер с job.
+Поднимаются:
+- Postgres
+- Kafka + Zookeeper
+- HDFS (NameNode/DataNode)
+- Spark master/worker + Spark maintenance job
+- Flink JobManager/TaskManager + Flink indexer submitter
+- seed producer (кладёт тестовые raw события в `raw-archive-events`)
 
-## Maven сборка
+### Полезные UI
+
+- HDFS NameNode UI: `http://localhost:9870`
+- Spark master UI: `http://localhost:8080`
+- Flink UI: `http://localhost:8082`
+
+## Важные детали
+
+- Flink отправляет merge-event **асинхронно** в `notifyCheckpointComplete`.
+- Ключ сообщения merge-event = `index_id`, чтобы события шли последовательно по индексу.
+- Spark merge пропускает `.in-progress` и слишком свежие файлы, что защищает от чтения незавершённых файлов.
+
+## Maven
 
 ```bash
 mvn -DskipTests package
-```
-
-Jar: `target/archive-maintenance.jar`
-
-## Примечания по прототипу
-
-- В проде подразумевается запуск на YARN (`spark-submit --master yarn --deploy-mode cluster`).
-- В compose используется standalone Spark для демонстрации потока.
-- `directory_switch` в прототипе создаёт новый путь как `activeDir-YYYY-MM-DD`.
-- Атомарная перезапись партиций реализована через `.__rewrite_tmp` + rename.
-
-## Минимальная доработка Flink
-
-В текущий Flink job добавить отправку события в Kafka в `notifyCheckpointComplete(checkpointId)`:
-
-```java
-// pseudo-code
-@Override
-public void notifyCheckpointComplete(long checkpointId) {
-    CheckpointEvent event = new CheckpointEvent(indexId, checkpointId, finalizedFiles, totalBytes, Instant.now());
-    producer.send(new ProducerRecord<>("merge-events", indexId, toJson(event)));
-}
 ```
