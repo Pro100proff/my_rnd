@@ -95,3 +95,7 @@ docker compose down -v
 ```bash
 mvn -DskipTests package
 ```
+
+## Troubleshooting
+
+Если видите ошибку pull образа Spark вида `bitnami/spark:3.5 not found`, используйте актуальный тег `bitnami/spark:3.5.1` (он уже зафиксирован в `docker-compose.yml` и Dockerfile maintenance-сервиса).
