@@ -1,6 +1,6 @@
 # Full-cycle prototype: Flink indexing + Spark maintenance
 
-Прототип теперь покрывает **полный цикл**:
+Прототип покрывает **полный цикл**:
 
 1. **Flink Indexer Job** читает сырые события из Kafka (`raw-archive-events`).
 2. Пишет небольшие ORC-файлы (~1 МБ) в HDFS: `/tmp/{index_id}/dt=YYYY-MM-DD/hr=HH/slot-*.orc`.
@@ -17,14 +17,60 @@
 - `com.platform.archive.maintenance.ArchiveMaintenanceJob`
   - long-running poll loop;
   - merge, rotation и deferred deletes через Postgres-метаданные.
+- `com.platform.archive.tools.RawEventGenerator`
+  - генератор сырых событий в `raw-archive-events`.
 
-## Docker Compose
+## Как запускать проект
+
+### 1) Требования
+
+- Docker + Docker Compose plugin (`docker compose`)
+- 8+ GB RAM (рекомендуется 12+ GB для локального стенда)
+- Открытые порты: `5432`, `9092`, `9870`, `8020`, `7077`, `8080`, `8082`
+
+### 2) Сборка и старт
 
 ```bash
-docker compose up --build
+docker compose up --build -d
 ```
 
-Поднимаются:
+Проверить статус:
+
+```bash
+docker compose ps
+```
+
+Смотреть логи важных сервисов:
+
+```bash
+docker compose logs -f flink-archive-indexer
+docker compose logs -f archive-maintenance
+docker compose logs -f kafka-raw-generator
+```
+
+### 3) Проверка, что пайплайн живой
+
+1. В логах `kafka-raw-generator` должны идти сообщения `generated=...`.
+2. В логах `flink-archive-indexer` должны появляться отправки `merge-event sent ...`.
+3. В логах `archive-maintenance` должны появляться сообщения `merge done index=...`.
+4. В HDFS должны появляться файлы в `/tmp/{index_id}/dt=.../hr=...`.
+
+Проверка HDFS через UI: `http://localhost:9870`.
+
+### 4) Остановка
+
+```bash
+docker compose down
+```
+
+С удалением томов (полный reset):
+
+```bash
+docker compose down -v
+```
+
+## Что поднимается в compose
+
 - Postgres
 - Kafka + Zookeeper
 - HDFS (NameNode/DataNode)
@@ -32,7 +78,7 @@ docker compose up --build
 - Flink JobManager/TaskManager + Flink indexer submitter
 - `kafka-raw-generator` (непрерывно генерирует raw события в `raw-archive-events`)
 
-### Полезные UI
+## Полезные UI
 
 - HDFS NameNode UI: `http://localhost:9870`
 - Spark master UI: `http://localhost:8080`
@@ -44,14 +90,8 @@ docker compose up --build
 - Ключ сообщения merge-event = `index_id`, чтобы события шли последовательно по индексу.
 - Spark merge пропускает `.in-progress` и слишком свежие файлы, что защищает от чтения незавершённых файлов.
 
-## Maven
+## Maven (локальная сборка jar)
 
 ```bash
 mvn -DskipTests package
 ```
-
-
-## Kafka генератор
-
-Генератор: `com.platform.archive.tools.RawEventGenerator` (служба `kafka-raw-generator` в compose).
-Параметры: `--kafka-brokers`, `--topic`, `--interval-ms`.
